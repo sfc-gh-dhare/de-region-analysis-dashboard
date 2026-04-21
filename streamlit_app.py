@@ -105,6 +105,8 @@ with st.sidebar:
         "**Feature threshold:** > 0 credits, 3-mo window  \n"
         "**Adoption target:** < 500 credits last month"
     )
+    st.divider()
+    st.caption("Questions/Contact: David Hare")
 
 
 # ─── Data Loaders ───────────────────────────────────────────────────────────
@@ -492,7 +494,7 @@ st.divider()
 
 # ─── 7 Section Tabs ─────────────────────────────────────────────────────────
 tabs = st.tabs([
-    "📊 Territory Overview",
+    "📊 Consumption Summary",
     "🔬 Cross-Feature",
     "🎯 Adoption Targets",
     "🏗️ Maturity Tiers",
@@ -740,44 +742,87 @@ with tabs[1]:
 # ── Tab 3: Adoption Targets ───────────────────────────────────────────────────
 with tabs[2]:
     st.subheader(f"Account Feature Adoption Targets ({M3_LBL})")
-    st.caption("Top 10 highest-consuming accounts with < 500 credits of each feature. Sorted by total DE+Lakehouse credits.")
+    st.caption("Top 10 highest-consuming accounts with < 500 credits of the target feature. Sorted by total DE+Lakehouse credits.")
     with st.spinner("Loading feature adoption data…"):
         df_feat = q_features(theater, region_sql)
 
     if not df_feat.empty:
-        feat_tabs = st.tabs(["Openflow", "Snowpipe Streaming", "Interop + Lakehouse", "Dynamic Tables", "Snowpark"])
-        configs = [
-            ("Openflow", "OPENFLOW", None, "🌊 Massive whitespace — top accounts have zero Openflow credits. The connector conversation is wide open."),
-            ("Snowpipe Streaming", "STREAMING", None, "⚡ Real-time ingestion is the largest untapped opportunity. Claims feeds, EHR events, and ADT notifications are natural HCLS fits."),
-            ("Interop + Lakehouse", None, ("ICEBERG", "LAKEHOUSE"), "🏔️ The Lakehouse story hasn't fully landed. Heavy dbt+DT accounts with near-zero Iceberg/Lakehouse credits are the natural next movers."),
-            ("Dynamic Tables", "DT", None, "♻️ DT-using accounts show higher average growth. High-credit accounts on Tasks/DML are the top DT migration targets."),
-            ("Snowpark", "SNOWPARK", None, "🐍 Snowpark is at high penetration but several growing accounts have minimal usage. Introduce for Python-based pipelines during expansion conversations."),
-        ]
-        for ft, (feat_name, feat_col, combo_cols, blurb) in zip(feat_tabs, configs):
-            with ft:
-                if combo_cols:
-                    df_t = df_feat[(df_feat[combo_cols[0]] + df_feat[combo_cols[1]]) < 500].head(10).reset_index(drop=True)
-                    disp_col = "Iceberg + Lakehouse"
-                    df_t[disp_col] = df_t[combo_cols[0]] + df_t[combo_cols[1]]
-                    extra = [disp_col]
-                else:
-                    df_t = df_feat[df_feat[feat_col] < 500].head(10).reset_index(drop=True)
-                    extra = [feat_col]
+        INTEROP_LABEL = "DE Interoperable Storage (Iceberg Ingestion & Transformation)"
+        LAKEHOUSE_LABEL = "Lakehouse Analytics (Iceberg Reads)"
 
-                df_t = add_sfdc(df_t)
-                df_t.index = df_t.index + 1
-                show = ["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS"] + extra + ["SFDC_LINK"]
-                disp = df_t[[c for c in show if c in df_t.columns]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
-                styled_t = disp.style.format(
-                    {f"{M3_LBL} Credits": lambda v: fmt_cr(v),
-                     **{c: lambda v: fmt_cr(v) for c in extra if c in disp.columns}}
-                )
-                st.dataframe(
-                    styled_t,
-                    column_config={"SFDC_LINK": st.column_config.LinkColumn("SFDC", display_text="↗", width="small")},
-                    use_container_width=True,
-                )
-                st.info(blurb)
+        feat_tabs = st.tabs(["Openflow", "Snowpipe Streaming", "DE - Interoperable Storage", "Lakehouse Analytics", "Dynamic Tables", "Snowpark"])
+
+        simple_configs = [
+            ("Openflow", "OPENFLOW", "🌊 Massive whitespace — top accounts have zero Openflow credits. The connector conversation is wide open."),
+            ("Snowpipe Streaming", "STREAMING", "⚡ Real-time ingestion is the largest untapped opportunity. Claims feeds, EHR events, and ADT notifications are natural HCLS fits."),
+            ("Dynamic Tables", "DT", "♻️ DT-using accounts show higher average growth. High-credit accounts on Tasks/DML are the top DT migration targets."),
+            ("Snowpark", "SNOWPARK", "🐍 Snowpark is at high penetration but several growing accounts have minimal usage. Introduce for Python-based pipelines during expansion conversations."),
+        ]
+
+        def _render_interop_lakehouse(df_source, filter_col, filter_label, blurb):
+            df_t = df_source[df_source[filter_col] < 500].head(10).reset_index(drop=True)
+            df_t = df_t.copy()
+            df_t[INTEROP_LABEL] = df_t["ICEBERG"]
+            df_t[LAKEHOUSE_LABEL] = df_t["LAKEHOUSE"]
+            df_t = add_sfdc(df_t)
+            df_t.index = df_t.index + 1
+            show = ["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", INTEROP_LABEL, LAKEHOUSE_LABEL, "SFDC_LINK"]
+            disp = df_t[[c for c in show if c in df_t.columns]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
+            styled_t = disp.style.format(
+                {f"{M3_LBL} Credits": lambda v: fmt_cr(v),
+                 INTEROP_LABEL: lambda v: fmt_cr(v),
+                 LAKEHOUSE_LABEL: lambda v: fmt_cr(v)}
+            )
+            st.dataframe(
+                styled_t,
+                column_config={"SFDC_LINK": st.column_config.LinkColumn("SFDC", display_text="↗", width="small")},
+                use_container_width=True,
+            )
+            st.info(blurb)
+
+        with feat_tabs[0]:
+            df_t = df_feat[df_feat["OPENFLOW"] < 500].head(10).reset_index(drop=True)
+            df_t = add_sfdc(df_t)
+            df_t.index = df_t.index + 1
+            disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "OPENFLOW", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
+            st.dataframe(disp.style.format({f"{M3_LBL} Credits": lambda v: fmt_cr(v), "OPENFLOW": lambda v: fmt_cr(v)}),
+                         column_config={"SFDC_LINK": st.column_config.LinkColumn("SFDC", display_text="↗", width="small")}, use_container_width=True)
+            st.info("🌊 Massive whitespace — top accounts have zero Openflow credits. The connector conversation is wide open.")
+
+        with feat_tabs[1]:
+            df_t = df_feat[df_feat["STREAMING"] < 500].head(10).reset_index(drop=True)
+            df_t = add_sfdc(df_t)
+            df_t.index = df_t.index + 1
+            disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "STREAMING", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
+            st.dataframe(disp.style.format({f"{M3_LBL} Credits": lambda v: fmt_cr(v), "STREAMING": lambda v: fmt_cr(v)}),
+                         column_config={"SFDC_LINK": st.column_config.LinkColumn("SFDC", display_text="↗", width="small")}, use_container_width=True)
+            st.info("⚡ Real-time ingestion is the largest untapped opportunity. Claims feeds, EHR events, and ADT notifications are natural HCLS fits.")
+
+        with feat_tabs[2]:
+            _render_interop_lakehouse(df_feat, "ICEBERG", INTEROP_LABEL,
+                "🏔️ Accounts with high DE credits but low Iceberg usage — prime targets for the Interoperable Storage story.")
+
+        with feat_tabs[3]:
+            _render_interop_lakehouse(df_feat, "LAKEHOUSE", LAKEHOUSE_LABEL,
+                "📊 Accounts with high DE credits but low Lakehouse Analytics usage — the analytics-on-Iceberg motion is wide open.")
+
+        with feat_tabs[4]:
+            df_t = df_feat[df_feat["DT"] < 500].head(10).reset_index(drop=True)
+            df_t = add_sfdc(df_t)
+            df_t.index = df_t.index + 1
+            disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "DT", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
+            st.dataframe(disp.style.format({f"{M3_LBL} Credits": lambda v: fmt_cr(v), "DT": lambda v: fmt_cr(v)}),
+                         column_config={"SFDC_LINK": st.column_config.LinkColumn("SFDC", display_text="↗", width="small")}, use_container_width=True)
+            st.info("♻️ DT-using accounts show higher average growth. High-credit accounts on Tasks/DML are the top DT migration targets.")
+
+        with feat_tabs[5]:
+            df_t = df_feat[df_feat["SNOWPARK"] < 500].head(10).reset_index(drop=True)
+            df_t = add_sfdc(df_t)
+            df_t.index = df_t.index + 1
+            disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "SNOWPARK", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
+            st.dataframe(disp.style.format({f"{M3_LBL} Credits": lambda v: fmt_cr(v), "SNOWPARK": lambda v: fmt_cr(v)}),
+                         column_config={"SFDC_LINK": st.column_config.LinkColumn("SFDC", display_text="↗", width="small")}, use_container_width=True)
+            st.info("🐍 Snowpark is at high penetration but several growing accounts have minimal usage. Introduce for Python-based pipelines during expansion conversations.")
 
 # ── Tab 4: Maturity Tiers ─────────────────────────────────────────────────────
 with tabs[3]:
@@ -907,6 +952,15 @@ def _call_cortex_recommendations(theater, region_label, context_str):
         "Scores should vary meaningfully — do NOT decrease by a fixed increment. "
         "Some plays may score similarly if evidence is comparable; others may score much lower "
         "if the territory data is weak for that motion. "
+        "For each strategy also include a Target Accounts line listing the specific account "
+        "names from the data that are most likely to succeed with that motion — drawn from the "
+        "growers, whitespace, and feature adoption data provided. Name real accounts; do not use "
+        "placeholders. If fewer than 3 accounts clearly apply, name those and note why. "
+        "Format EACH strategy exactly as follows (the bold name on its own line first, then bullets):\\n"
+        "**[Short descriptive strategy name]**\\n"
+        "- **Confidence Score: XX%**\\n"
+        "- **Target Accounts:** [comma-separated account names]\\n"
+        "- [Strategy description in 1-2 sentences]\\n\\n"
         "Present strategies sorted by Confidence Score descending (highest first).\\n\\n"
         "**PART 2 — TOP 10 TARGET ACCOUNTS**\\n"
         "Identify the 10 highest-priority individual accounts to engage for consumption growth. "
@@ -916,9 +970,12 @@ def _call_cortex_recommendations(theater, region_label, context_str):
         "Score high when the account has strong recent momentum, identifiable feature gaps, and "
         "high absolute credit volume. Score lower for volatile trend, thin data, or near-zero base. "
         "Present accounts sorted by Confidence Score descending (highest first).\\n"
-        "  (b) **Why** — the specific data-driven reason this account is a top target\\n"
-        "  (c) **Whitespace** — what feature or use-case gap exists\\n"
-        "  (d) **Approach** — recommended engagement action\\n\\n"
+        "Format EACH account exactly as follows (bold account name on its own line first, then bullets):\\n"
+        "**[Account Name]**\\n"
+        "- **Confidence Score: XX%**\\n"
+        "- **Why:** [data-driven reason]\\n"
+        "- **Whitespace:** [feature or use-case gap]\\n"
+        "- **Approach:** [recommended engagement action]\\n\\n"
         "Format with clear markdown headers, bold account names, and bold Confidence Score labels. "
         "Be direct and field-ready — not generic.\\n\\n"
         "TERRITORY DATA:\\n" + safe
@@ -1468,6 +1525,62 @@ def q_uc_ai(theater, region, wins_text, losses_text):
             return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def q_uc_themes(theater, region, recent_text):
+    territory_label = f"{theater}" + (f" / {region}" if region != ALL_REGIONS else " (all regions)")
+    safe = recent_text.replace("\\", "\\\\").replace("'", "''")
+    prompt = (
+        f"You are a senior Snowflake Data Engineering field expert. "
+        f"Analyze the following recent DE use case wins and losses for {territory_label}. "
+        "Identify the top recurring THEMES across wins and losses separately.\\n\\n"
+        "**WIN THEMES** — patterns across wins and go-lives\\n"
+        "Identify 3-5 themes. For each: a short bold theme name, description of the pattern, "
+        "and specific evidence from the data (account names, features, business problems, "
+        "architectural patterns, displaced competitors).\\n\\n"
+        "**LOSS THEMES** — patterns across lost deals\\n"
+        "Identify 3-5 themes. For each: a short bold theme name, description of the pattern, "
+        "and specific evidence (loss reasons, vendors that won, features that were weak, "
+        "common objections or deal blockers).\\n\\n"
+        "Be specific and evidence-based. Reference actual account names and details from the data.\\n\\n"
+        "USE CASE DATA:\\n"
+    )
+    sql = (
+        "SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '"
+        + prompt + safe
+        + "') AS RESPONSE"
+    )
+    try:
+        return conn.query(sql, ttl=0)
+    except Exception:
+        try:
+            sql2 = sql.replace("'claude-3-5-sonnet'", "'mistral-large2'")
+            return conn.query(sql2, ttl=0)
+        except Exception:
+            return None
+
+
+def _uc_recent_to_themes_text(df, max_rows=50):
+    lines = []
+    for _, r in df.head(max_rows).iterrows():
+        outcome = r.get("OUTCOME", "?")
+        line = f"[{outcome}] Account: {r.get('ACCOUNT_NAME','?')} | Feature: {r.get('PRIORITIZED_FEATURE','?')} | Region: {r.get('REGION','?')}"
+        if r.get("LOST_REASON"):
+            line += f" | Lost Reason: {r['LOST_REASON']}"
+        if r.get("VENDOR_OF_CHOICE"):
+            line += f" | Won By: {r['VENDOR_OF_CHOICE']}"
+        if r.get("COMPETITORS"):
+            line += f" | Competitors: {r['COMPETITORS']}"
+        if r.get("INCUMBENT_VENDOR"):
+            line += f" | Incumbent: {r['INCUMBENT_VENDOR']}"
+        if r.get("MEDDPICC_SCORE"):
+            line += f" | MEDDPICC: {r['MEDDPICC_SCORE']}"
+        summary = r.get("WIN_SUMMARY") or r.get("LOSS_DESCRIPTION_KEY_INSIGHTS")
+        if summary and str(summary).strip():
+            line += f" | Summary: {str(summary)[:150]}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _uc_rows_to_text(df, kind, max_rows=30):
     lines = [f"=== {kind} (up to {max_rows} records) ==="]
     for _, r in df.head(max_rows).iterrows():
@@ -1515,24 +1628,26 @@ def q_pgap_summary(theater, region):
             p.PRODUCT_LINE_C AS PRODUCT_CATEGORY,
             p.PRODUCT_AREA_C AS PRODUCT_USE_CASE,
             p.FEATURE_GROUP_C AS FEATURE_GROUP,
-            p.STATUS_C AS STATUS,
-            p.OWNER_NAME AS ASSIGNEE,
+            COALESCE(j.STATUS, p.STATUS_C) AS STATUS,
+            ARRAY_TO_STRING(ARRAY_AGG(DISTINCT ac.SALESFORCE_ACCOUNT_NAME), ', ') AS CUSTOMERS_IMPACTED,
             COUNT(DISTINCT ag.ACCOUNT_ID) AS ACCOUNT_COUNT,
             MAX(p.ACCOUNT_GAP_SUM_C) AS TOTAL_ACV
         FROM sales.dev.ACCOUNT_GAPS ag
         JOIN sales.dev.PRODUCT_GAPS p
             ON p.ID = ag.PRODUCT_GAP_ID
             AND p.DS = (SELECT MAX(DS) FROM sales.dev.PRODUCT_GAPS)
+        LEFT JOIN sales.se_reporting.DIM_JIRA_PGAP j
+            ON j.VIVUN_PRODUCT_GAP_ID = p.ID
         JOIN (
-            SELECT DISTINCT SALESFORCE_ACCOUNT_ID
+            SELECT DISTINCT SALESFORCE_ACCOUNT_ID, SALESFORCE_ACCOUNT_NAME
             FROM sales.raven.d_salesforce_account_customers
             WHERE {acct_f}
-        ) acf ON acf.SALESFORCE_ACCOUNT_ID = ag.ACCOUNT_ID
+        ) ac ON ac.SALESFORCE_ACCOUNT_ID = ag.ACCOUNT_ID
         WHERE ag.DS = (SELECT MAX(DS) FROM sales.dev.ACCOUNT_GAPS)
           AND p.JIRA_ISSUE_KEY LIKE 'PGAP-%'
-          AND UPPER(p.STATUS_C) NOT LIKE 'DONE%'
+          AND UPPER(COALESCE(j.STATUS, p.STATUS_C)) NOT LIKE 'DONE%'
           AND p.PRODUCT_LINE_C = 'Data Engineering'
-        GROUP BY 1,2,3,4,5,6,7,8
+        GROUP BY 1,2,3,4,5,6,7
     """, ttl=0)
 
 
@@ -1638,7 +1753,7 @@ def q_biz_problems_ai(theater, region, summary_text):
         "For each theme provide: (1) a short name, (2) which industries it appears in, "
         "(3) total EACV opportunity, (4) 2-3 sentences on the business problem customers are solving, "
         "(5) the relevant Snowflake DE/Lakehouse capability that addresses it.\\n"
-        "Focus on industry-specific problems, not generic categories like 'Finance' or 'Operations'. "
+        "Focus on industry-specific problems, not generic categories like Finance or Operations. "
         "Format as markdown with headers for each theme. Limit to top 8 themes.\\n\\n"
         "USE CASE DATA:\\n" + safe
     )
@@ -1849,6 +1964,33 @@ with tabs[6]:
             st.info(f"No wins or losses with a Decision Date between {uc_date_from.strftime('%b %d, %Y')} and {uc_date_to.strftime('%b %d, %Y')}.")
 
         st.divider()
+        st.markdown("### Win/Loss Themes")
+        st.caption("Identify recurring patterns across wins and losses — architecture, business problems, features, competitors")
+        if st.button("Identify Themes", key="uc_themes_btn", type="primary"):
+            if df_uc_recent is not None and not df_uc_recent.empty:
+                themes_text = _uc_recent_to_themes_text(df_uc_recent)
+                with st.spinner("Identifying themes — this may take 15–30 seconds…"):
+                    themes_df = q_uc_themes(theater, region, themes_text)
+                if themes_df is not None and not themes_df.empty:
+                    response = str(themes_df["RESPONSE"].iloc[0])
+                    split = response.split("**LOSS THEMES")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        with st.container(border=True):
+                            st.markdown("### Win Themes")
+                            st.markdown(split[0].replace("**WIN THEMES**", "").replace("**WIN THEMES —", "").strip())
+                    with col2:
+                        with st.container(border=True):
+                            st.markdown("### Loss Themes")
+                            st.markdown(("**LOSS THEMES" + split[1]) if len(split) > 1 else "")
+                else:
+                    st.warning("Theme analysis unavailable — Cortex model error.")
+            else:
+                st.info("No recent win/loss data to analyze.")
+        else:
+            st.info("Click **Identify Themes** to surface recurring patterns across wins and losses.")
+
+        st.divider()
         st.markdown("### AI Win/Loss Synthesis")
         st.caption("Powered by Snowflake Cortex claude-3-5-sonnet · Based on last 12 months of DE use cases")
 
@@ -1905,8 +2047,9 @@ with tabs[7]:
         df_pgap_sum["PGAP_LINK"] = df_pgap_sum["PGAP_URL"].fillna("") + "#" + df_pgap_sum["PGAP_ID"].fillna("")
 
         tab_sum_df = (
-            df_pgap_sum[["PGAP_LINK", "PGAP_TITLE", "PRODUCT_CATEGORY", "PRODUCT_USE_CASE",
-                          "FEATURE_GROUP", "STATUS", "ASSIGNEE", "ACCOUNT_COUNT", "TOTAL_ACV"]]
+            df_pgap_sum[["PGAP_LINK", "PGAP_TITLE", "PRODUCT_USE_CASE",
+                          "FEATURE_GROUP", "STATUS", "ACCOUNT_COUNT", "TOTAL_ACV",
+                          "CUSTOMERS_IMPACTED"]]
             .copy()
         )
         tab_sum_df["TOTAL_ACV"] = pd.to_numeric(tab_sum_df["TOTAL_ACV"], errors="coerce").fillna(0).round(0).astype(int)
@@ -1919,13 +2062,12 @@ with tabs[7]:
             column_config={
                 "PGAP_LINK": st.column_config.LinkColumn("PGAP", display_text=r"#(PGAP-\d+)"),
                 "PGAP_TITLE": st.column_config.TextColumn("Title", width="large"),
-                "PRODUCT_CATEGORY": st.column_config.TextColumn("Product Category"),
                 "PRODUCT_USE_CASE": st.column_config.TextColumn("Product Use Case"),
                 "FEATURE_GROUP": st.column_config.TextColumn("Feature Group"),
                 "STATUS": st.column_config.TextColumn("Status"),
-                "ASSIGNEE": st.column_config.TextColumn("Assignee"),
                 "ACCOUNT_COUNT": st.column_config.NumberColumn("# Accounts", format="%d"),
                 "TOTAL_ACV": st.column_config.NumberColumn("Total ACV", format="$%,d"),
+                "CUSTOMERS_IMPACTED": st.column_config.TextColumn("Customers Impacted", width="large"),
             },
             hide_index=True,
             height=560,
@@ -2003,47 +2145,6 @@ with tabs[8]:
                 },
                 hide_index=True,
                 height=420,
-            )
-
-        st.divider()
-        st.markdown("### Use Case Detail by Business Problem")
-
-        if df_biz_det is not None and not df_biz_det.empty:
-            all_problems = ["(All)"] + sorted(df_biz_det["BUSINESS_PROBLEM"].dropna().unique().tolist())
-            sel_prob = st.selectbox("Filter by Business Problem", options=all_problems, key="biz_prob_sel")
-            df_bd = df_biz_det.copy()
-            if sel_prob != "(All)":
-                df_bd = df_bd[df_bd["BUSINESS_PROBLEM"] == sel_prob]
-
-            SFDC_UC_BASE = "https://snowforce.lightning.force.com/lightning/r/Use_Case__c/{}/view"
-            df_bd["UC_LINK"] = df_bd.apply(
-                lambda r: SFDC_UC_BASE.format(str(r["USE_CASE_ID"])) + "#" + str(r["USE_CASE_NAME"])
-                if pd.notna(r.get("USE_CASE_ID")) and str(r.get("USE_CASE_ID", "")).startswith("aPa")
-                else (str(r.get("USE_CASE_NAME", "")) or ""),
-                axis=1,
-            )
-            df_bd["EACV_K"] = (pd.to_numeric(df_bd["EACV"], errors="coerce").fillna(0) / 1_000).round(1)
-            disp_det = df_bd[[
-                "UC_LINK", "ACCOUNT_NAME", "BUSINESS_PROBLEM", "ACCOUNT_INDUSTRY",
-                "EACV_K", "USE_CASE_STAGE", "TECHNICAL_USE_CASE",
-            ]].rename(columns={
-                "UC_LINK": "Use Case",
-                "ACCOUNT_NAME": "Account",
-                "BUSINESS_PROBLEM": "Business Problem",
-                "ACCOUNT_INDUSTRY": "Industry",
-                "EACV_K": "EACV ($K)",
-                "USE_CASE_STAGE": "Stage",
-                "TECHNICAL_USE_CASE": "Technical Use Case",
-            })
-            st.dataframe(
-                disp_det,
-                use_container_width=True,
-                column_config={
-                    "Use Case": st.column_config.LinkColumn("Use Case", display_text=r"#(.+)"),
-                    "EACV ($K)": st.column_config.NumberColumn("EACV ($K)", format="$%.1fK"),
-                },
-                hide_index=True,
-                height=480,
             )
 
         st.divider()
