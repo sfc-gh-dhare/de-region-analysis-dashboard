@@ -67,6 +67,7 @@ with st.sidebar:
     st.divider()
 
     st.caption("**Date Window**")
+    st.caption("Filter dates for Consumption, Gong Transcript, and Use Case Win / Go Live dates")
     _avail = [n_months_ago(i) for i in range(1, 37)]
     _avail_lbl = [d.strftime("%b %Y") for d in _avail]
     _month_map = {d.strftime("%b %Y"): d for d in _avail}
@@ -1693,7 +1694,8 @@ def q_pgap_summary(theater, region):
         WHERE ag.DS = (SELECT MAX(DS) FROM sales.dev.ACCOUNT_GAPS)
           AND p.JIRA_ISSUE_KEY LIKE 'PGAP-%'
           AND UPPER(COALESCE(j.STATUS, p.STATUS_C)) NOT LIKE 'DONE%'
-          AND p.PRODUCT_LINE_C = 'Data Engineering'
+          AND UPPER(COALESCE(j.STATUS, p.STATUS_C)) != 'NOT DONE, CLOSED'
+          AND COALESCE(j.PRODUCT_CATEGORY, p.PRODUCT_LINE_C) = 'Data Engineering'
         GROUP BY 1,2,3,4,5,6,7
     """, ttl=0)
 
@@ -1726,7 +1728,8 @@ def q_pgap_detail(theater, region):
         WHERE ag.DS = (SELECT MAX(DS) FROM sales.dev.ACCOUNT_GAPS)
           AND p.JIRA_ISSUE_KEY LIKE 'PGAP-%'
           AND UPPER(p.STATUS_C) NOT LIKE 'DONE%'
-        ORDER BY ag.ACCOUNT_GAP_AMOUNT_C DESC NULLS LAST
+          AND UPPER(p.STATUS_C) != 'NOT DONE, CLOSED'
+          AND COALESCE(j.PRODUCT_CATEGORY, p.PRODUCT_LINE_C) = 'Data Engineering'
         LIMIT 2000
     """, ttl=0)
 
