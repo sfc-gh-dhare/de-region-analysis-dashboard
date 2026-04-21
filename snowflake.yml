@@ -1,0 +1,17 @@
+definition_version: 2
+entities:
+  de_region_analysis_dashboard:
+    type: streamlit
+    identifier:
+      name: DE_REGION_ANALYSIS_DASHBOARD
+      database: "USER$DHARE"
+      schema: PUBLIC
+    query_warehouse: SNOWADHOC
+    compute_pool: PDS_SIS_COMPUTE_POOL
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    external_access_integrations:
+      - PYPI_ACCESS_INTEGRATION
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
+      - pyproject.toml
