@@ -22,12 +22,19 @@ def n_months_ago(n: int) -> date:
     return date(y, m, 1)
 
 
-M1, M2, M3 = n_months_ago(3), n_months_ago(2), n_months_ago(1)
-M1_LBL = M1.strftime("%b %Y")
-M2_LBL = M2.strftime("%b %Y")
-M3_LBL = M3.strftime("%b %Y")
-_m3_next = date(M3.year + (1 if M3.month == 12 else 0), M3.month % 12 + 1, 1)
-M3_END = _m3_next - timedelta(days=1)
+def add_months(d: date, n: int) -> date:
+    m, y = d.month + n, d.year
+    while m > 12:
+        m -= 12
+        y += 1
+    while m <= 0:
+        m += 12
+        y -= 1
+    return date(y, m, 1)
+
+
+_DEF_M1 = n_months_ago(3)
+_DEF_M3 = n_months_ago(1)
 
 FEATURE_DEFS = {
     "Dynamic Tables":            "f.primary_feature = 'DT refresh'",
@@ -36,7 +43,7 @@ FEATURE_DEFS = {
     "Openflow":                  "f.primary_feature IN ('Openflow','Openflow Connector','Iceberg Openflow')",
     "Snowpipe Streaming":        "f.primary_feature IN ('Snowpipe Streaming','Snowpipe Streaming v2')",
     "Iceberg Storage":           "f.primary_feature ILIKE 'Iceberg%'",
-    "Lakehouse Analytics":       "f.product_category='Analytics' AND f.primary_feature='Lakehouse Analytics'",
+    "Iceberg Reads":       "f.product_category='Analytics' AND f.primary_feature='Lakehouse Analytics'",
 }
 ALL_FEATURES = list(FEATURE_DEFS.keys())
 ALL_REGIONS = "__ALL__"
@@ -57,6 +64,35 @@ def _territory_options():
 
 with st.sidebar:
     st.markdown("## DE Territory Deep Dive")
+    st.divider()
+
+    st.caption("**Date Window**")
+    _avail = [n_months_ago(i) for i in range(1, 37)]
+    _avail_lbl = [d.strftime("%b %Y") for d in _avail]
+    _month_map = {d.strftime("%b %Y"): d for d in _avail}
+    _dw_from_lbl = st.selectbox(
+        "From", _avail_lbl,
+        index=_avail_lbl.index(_DEF_M1.strftime("%b %Y")),
+        key="dw_from",
+    )
+    _dw_to_lbl = st.selectbox(
+        "To", _avail_lbl,
+        index=_avail_lbl.index(_DEF_M3.strftime("%b %Y")),
+        key="dw_to",
+    )
+    M1 = _month_map[_dw_from_lbl]
+    M3 = _month_map[_dw_to_lbl]
+    if M1 > M3:
+        M1, M3 = M3, M1
+    _span = (M3.year - M1.year) * 12 + (M3.month - M1.month)
+    M2 = add_months(M1, max(1, _span // 2))
+    M1_LBL = M1.strftime("%b %Y")
+    M2_LBL = M2.strftime("%b %Y")
+    M3_LBL = M3.strftime("%b %Y")
+    _m3_next = add_months(M3, 1)
+    M3_END = _m3_next - timedelta(days=1)
+    dw_from = M1
+    dw_to_end = M3_END
     st.caption(f"{M1_LBL} – {M3_LBL}  ·  ~3-day lag")
     st.divider()
 
@@ -94,11 +130,6 @@ with st.sidebar:
         feature_filter = " OR ".join(f"({c})" for c in conds)
 
     st.divider()
-    st.caption("**Use Case Date Window** (for Recent Wins & Losses)")
-    uc_date_from = st.date_input("From", value=M1, key="uc_from")
-    uc_date_to = st.date_input("To", value=M3_END, key="uc_to")
-
-    st.divider()
     st.caption(
         "**Scope:** DE + Lakehouse Analytics  \n"
         "**Accounts:** Capacity customers only  \n"
@@ -107,6 +138,12 @@ with st.sidebar:
     )
     st.divider()
     st.caption("Questions/Contact: David Hare")
+
+
+_m1_date = M1.strftime("%Y-%m-%d")
+_m2_date = M2.strftime("%Y-%m-%d")
+_m3_date = M3.strftime("%Y-%m-%d")
+_m3_next_date = _m3_next.strftime("%Y-%m-%d")
 
 
 # ─── Data Loaders ───────────────────────────────────────────────────────────
@@ -133,7 +170,7 @@ def q_meta(theater, region_sql):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_summary(theater, region_sql, feature_filter):
+def q_summary(theater, region_sql, feature_filter, m1_date, m3_next_date):
     return conn.query("""
         WITH al AS (
             SELECT SALESFORCE_ACCOUNT_ID
@@ -156,8 +193,8 @@ def q_summary(theater, region_sql, feature_filter):
                    SUM(f.total_credits) AS cr
             FROM sales.raven.A360_PRODUCT_CATEGORY_DAILY_VIEW f
             JOIN al ON al.SALESFORCE_ACCOUNT_ID = f.salesforce_account_id
-            WHERE f.general_date >= DATEADD('month',-3,DATE_TRUNC('month',CURRENT_DATE()))
-              AND f.general_date < DATE_TRUNC('month',CURRENT_DATE())
+            WHERE f.general_date >= '{m1_date}'
+              AND f.general_date < '{m3_next_date}'
               AND (f.product_category='Data Engineering'
                    OR (f.product_category='Analytics' AND f.primary_feature='Lakehouse Analytics'))
               AND ({feature_filter})
@@ -172,11 +209,12 @@ def q_summary(theater, region_sql, feature_filter):
             ROUND(SUM(CASE WHEN cat='Lakehouse' THEN cr ELSE 0 END),0) AS LAKEHOUSE_ANALYTICS,
             COUNT(DISTINCT salesforce_account_id) AS ACTIVE_ACCOUNTS
         FROM mf GROUP BY 1 ORDER BY 1
-    """.format(theater=theater, region_sql=region_sql, feature_filter=feature_filter), ttl=0)
+    """.format(theater=theater, region_sql=region_sql, feature_filter=feature_filter,
+               m1_date=m1_date, m3_next_date=m3_next_date), ttl=0)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_pivoted(theater, region_sql, feature_filter):
+def q_pivoted(theater, region_sql, feature_filter, m1_date, m2_date, m3_date, m3_next_date):
     return conn.query("""
         WITH al AS (
             SELECT SALESFORCE_ACCOUNT_ID, SALESFORCE_ACCOUNT_NAME,
@@ -191,8 +229,8 @@ def q_pivoted(theater, region_sql, feature_filter):
                    ROUND(SUM(f.total_credits),0) AS cr
             FROM sales.raven.A360_PRODUCT_CATEGORY_DAILY_VIEW f
             JOIN al a ON a.SALESFORCE_ACCOUNT_ID = f.salesforce_account_id
-            WHERE f.general_date >= DATEADD('month',-3,DATE_TRUNC('month',CURRENT_DATE()))
-              AND f.general_date < DATE_TRUNC('month',CURRENT_DATE())
+            WHERE f.general_date >= '{m1_date}'
+              AND f.general_date < '{m3_next_date}'
               AND (f.product_category='Data Engineering'
                    OR (f.product_category='Analytics' AND f.primary_feature='Lakehouse Analytics'))
               AND ({feature_filter})
@@ -203,23 +241,24 @@ def q_pivoted(theater, region_sql, feature_filter):
                MAX(SALESFORCE_OWNER_NAME) AS AE,
                MAX(LEAD_SALES_ENGINEER_NAME) AS SE,
                MAX(SALES_AREA) AS REGION,
-               COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0) AS M1,
-               COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-2,CURRENT_DATE()))::DATE THEN cr END),0) AS M2,
-               COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-1,CURRENT_DATE()))::DATE THEN cr END),0) AS M3,
+               COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0) AS M1,
+               COALESCE(MAX(CASE WHEN month='{m2_date}'::DATE THEN cr END),0) AS M2,
+               COALESCE(MAX(CASE WHEN month='{m3_date}'::DATE THEN cr END),0) AS M3,
                CASE
-                   WHEN COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0) > 0
+                   WHEN COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0) > 0
                    THEN ROUND(
-                       (COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-1,CURRENT_DATE()))::DATE THEN cr END),0) -
-                        COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0)) /
-                       COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0) * 100.0, 1)
+                       (COALESCE(MAX(CASE WHEN month='{m3_date}'::DATE THEN cr END),0) -
+                        COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0)) /
+                       COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0) * 100.0, 1)
                    ELSE NULL
                END AS PCT_CHANGE
         FROM m GROUP BY 1
-    """.format(theater=theater, region_sql=region_sql, feature_filter=feature_filter), ttl=0)
+    """.format(theater=theater, region_sql=region_sql, feature_filter=feature_filter,
+               m1_date=m1_date, m2_date=m2_date, m3_date=m3_date, m3_next_date=m3_next_date), ttl=0)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_cross_feature(theater, region_sql):
+def q_cross_feature(theater, region_sql, m1_date, m3_date, m3_next_date):
     return conn.query("""
         WITH al AS (
             SELECT SALESFORCE_ACCOUNT_ID
@@ -232,20 +271,20 @@ def q_cross_feature(theater, region_sql):
                    ROUND(SUM(f.total_credits),0) AS cr
             FROM sales.raven.A360_PRODUCT_CATEGORY_DAILY_VIEW f
             JOIN al a ON a.SALESFORCE_ACCOUNT_ID = f.salesforce_account_id
-            WHERE f.general_date >= DATEADD('month',-3,DATE_TRUNC('month',CURRENT_DATE()))
-              AND f.general_date < DATE_TRUNC('month',CURRENT_DATE())
+            WHERE f.general_date >= '{m1_date}'
+              AND f.general_date < '{m3_next_date}'
               AND (f.product_category='Data Engineering'
                    OR (f.product_category='Analytics' AND f.primary_feature='Lakehouse Analytics'))
             GROUP BY 1,2
         ), p AS (
             SELECT SALESFORCE_ACCOUNT_ID,
-                   COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0) AS M1,
-                   COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-1,CURRENT_DATE()))::DATE THEN cr END),0) AS M3,
-                   CASE WHEN COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0) > 0
+                   COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0) AS M1,
+                   COALESCE(MAX(CASE WHEN month='{m3_date}'::DATE THEN cr END),0) AS M3,
+                   CASE WHEN COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0) > 0
                         THEN ROUND(
-                            (COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-1,CURRENT_DATE()))::DATE THEN cr END),0) -
-                             COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0)) /
-                            COALESCE(MAX(CASE WHEN month=DATE_TRUNC('month',DATEADD('month',-3,CURRENT_DATE()))::DATE THEN cr END),0)*100.0, 1)
+                            (COALESCE(MAX(CASE WHEN month='{m3_date}'::DATE THEN cr END),0) -
+                             COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0)) /
+                            COALESCE(MAX(CASE WHEN month='{m1_date}'::DATE THEN cr END),0)*100.0, 1)
                         ELSE NULL END AS PCT_CHANGE
             FROM m GROUP BY 1
         ), fu AS (
@@ -259,8 +298,8 @@ def q_cross_feature(theater, region_sql):
                    SUM(CASE WHEN f.product_category='Analytics' AND f.primary_feature='Lakehouse Analytics' THEN f.total_credits ELSE 0 END) AS lakehouse
             FROM sales.raven.A360_PRODUCT_CATEGORY_DAILY_VIEW f
             JOIN al a ON a.SALESFORCE_ACCOUNT_ID = f.salesforce_account_id
-            WHERE f.general_date >= DATEADD('month',-3,DATE_TRUNC('month',CURRENT_DATE()))
-              AND f.general_date < DATE_TRUNC('month',CURRENT_DATE())
+            WHERE f.general_date >= '{m1_date}'
+              AND f.general_date < '{m3_next_date}'
             GROUP BY 1
         ), c AS (
             SELECT p.*,
@@ -286,11 +325,12 @@ def q_cross_feature(theater, region_sql):
             UNION ALL SELECT 'Snowpipe Streaming', streaming>0, PCT_CHANGE FROM c
         ) GROUP BY FEATURE
         ORDER BY (AVG(CASE WHEN HAS_FEATURE THEN PCT_CHANGE END) - AVG(CASE WHEN NOT HAS_FEATURE THEN PCT_CHANGE END)) DESC NULLS LAST
-    """.format(theater=theater, region_sql=region_sql), ttl=0)
+    """.format(theater=theater, region_sql=region_sql,
+               m1_date=m1_date, m3_date=m3_date, m3_next_date=m3_next_date), ttl=0)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_features(theater, region_sql):
+def q_features(theater, region_sql, m3_date, m3_next_date):
     return conn.query("""
         SELECT * FROM (
             SELECT a.SALESFORCE_ACCOUNT_ID,
@@ -321,16 +361,17 @@ def q_features(theater, region_sql):
                 WHERE GEO='{theater}' {region_sql}
                   AND IS_CAPACITY_CUSTOMER=TRUE AND IS_REVENUE_ACCOUNT=TRUE
             ) a ON a.SALESFORCE_ACCOUNT_ID = f.salesforce_account_id
-            WHERE f.general_date >= DATE_TRUNC('month',DATEADD('month',-1,CURRENT_DATE()))
-              AND f.general_date < DATE_TRUNC('month',CURRENT_DATE())
+            WHERE f.general_date >= '{m3_date}'
+              AND f.general_date < '{m3_next_date}'
             GROUP BY 1,2,3,4,5
         ) WHERE TOTAL_CREDITS > 0
         ORDER BY TOTAL_CREDITS DESC
-    """.format(theater=theater, region_sql=region_sql), ttl=0)
+    """.format(theater=theater, region_sql=region_sql,
+               m3_date=m3_date, m3_next_date=m3_next_date), ttl=0)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_maturity(theater, region_sql):
+def q_maturity(theater, region_sql, m3_date, m3_next_date):
     return conn.query("""
         SELECT * FROM (
             WITH al AS (
@@ -355,8 +396,8 @@ def q_maturity(theater, region_sql):
                            THEN f.total_credits ELSE 0 END),0) AS TOTAL_CREDITS
                 FROM sales.raven.A360_PRODUCT_CATEGORY_DAILY_VIEW f
                 JOIN al a ON a.SALESFORCE_ACCOUNT_ID = f.salesforce_account_id
-                WHERE f.general_date >= DATE_TRUNC('month',DATEADD('month',-1,CURRENT_DATE()))
-                  AND f.general_date < DATE_TRUNC('month',CURRENT_DATE())
+                WHERE f.general_date >= '{m3_date}'
+                  AND f.general_date < '{m3_next_date}'
                 GROUP BY 1,2,3,4,5
             )
             SELECT SALESFORCE_ACCOUNT_ID, ACCOUNT, AE, SE, REGION, TOTAL_CREDITS,
@@ -380,7 +421,8 @@ def q_maturity(theater, region_sql):
             FROM fu
         ) WHERE TOTAL_CREDITS > 0
         ORDER BY TOTAL_CREDITS DESC
-    """.format(theater=theater, region_sql=region_sql), ttl=0)
+    """.format(theater=theater, region_sql=region_sql,
+               m3_date=m3_date, m3_next_date=m3_next_date), ttl=0)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -413,8 +455,8 @@ def fmt_pct(v):
 
 with st.spinner("Loading territory data…"):
     df_meta = q_meta(theater, region_sql)
-    df_summary = q_summary(theater, region_sql, feature_filter)
-    df_pivoted = q_pivoted(theater, region_sql, feature_filter)
+    df_summary = q_summary(theater, region_sql, feature_filter, _m1_date, _m3_next_date)
+    df_pivoted = q_pivoted(theater, region_sql, feature_filter, _m1_date, _m2_date, _m3_date, _m3_next_date)
 
 # ─── Territory Metadata Header ───────────────────────────────────────────────
 
@@ -634,10 +676,10 @@ with _ov_tabs[1]:
         )
 
 with _ov_tabs[2]:
-    st.subheader(f"Top 15 Growers — {M1_LBL} → {M3_LBL}")
+    st.subheader(f"Top 30 Growers — {M1_LBL} → {M3_LBL}")
     growers = df_pivoted[df_pivoted["M1"] > 0].copy()
     growers["DELTA"] = growers["M3"] - growers["M1"]
-    growers = growers.sort_values("DELTA", ascending=False).head(15).reset_index(drop=True)
+    growers = growers.sort_values("DELTA", ascending=False).head(30).reset_index(drop=True)
     growers = add_sfdc(growers)
     growers.index = growers.index + 1
     display = growers[["ACCOUNT", "REGION", "AE", "SE", "M1", "M2", "M3", "DELTA", "PCT_CHANGE", "SFDC_LINK"]].rename(
@@ -663,10 +705,10 @@ with _ov_tabs[2]:
         )
 
 with _ov_tabs[3]:
-    st.subheader(f"Top 15 Decliners — {M1_LBL} → {M3_LBL}")
+    st.subheader(f"Top 30 Decliners — {M1_LBL} → {M3_LBL}")
     decliners = df_pivoted[(df_pivoted["M1"] > 0) & (df_pivoted["M3"] < df_pivoted["M1"])].copy()
     decliners["DELTA"] = decliners["M3"] - decliners["M1"]
-    decliners = decliners.sort_values("DELTA", ascending=True).head(15).reset_index(drop=True)
+    decliners = decliners.sort_values("DELTA", ascending=True).head(30).reset_index(drop=True)
     decliners = add_sfdc(decliners)
     decliners.index = decliners.index + 1
     display = decliners[["ACCOUNT", "REGION", "AE", "SE", "M1", "M2", "M3", "DELTA", "PCT_CHANGE", "SFDC_LINK"]].rename(
@@ -697,7 +739,7 @@ with tabs[1]:
         "Treat **account counts as the primary signal** — growth averages are skewed by ramp-phase outliers."
     )
     with st.spinner("Loading cross-feature data…"):
-        df_cf = q_cross_feature(theater, region_sql)
+        df_cf = q_cross_feature(theater, region_sql, _m1_date, _m3_date, _m3_next_date)
 
     if not df_cf.empty:
         def signal(row):
@@ -742,15 +784,15 @@ with tabs[1]:
 # ── Tab 3: Adoption Targets ───────────────────────────────────────────────────
 with tabs[2]:
     st.subheader(f"Account Feature Adoption Targets ({M3_LBL})")
-    st.caption("Top 10 highest-consuming accounts with < 500 credits of the target feature. Sorted by total DE+Lakehouse credits.")
+    st.caption("Top 30 highest-consuming accounts with < 500 credits of the target feature. Sorted by total DE+Lakehouse credits.")
     with st.spinner("Loading feature adoption data…"):
-        df_feat = q_features(theater, region_sql)
+        df_feat = q_features(theater, region_sql, _m3_date, _m3_next_date)
 
     if not df_feat.empty:
-        INTEROP_LABEL = "DE Interoperable Storage (Iceberg Ingestion & Transformation)"
-        LAKEHOUSE_LABEL = "Lakehouse Analytics (Iceberg Reads)"
+        INTEROP_LABEL = "Iceberg Writes"
+        LAKEHOUSE_LABEL = "Iceberg Reads"
 
-        feat_tabs = st.tabs(["Openflow", "Snowpipe Streaming", "DE - Interoperable Storage", "Lakehouse Analytics", "Dynamic Tables", "Snowpark"])
+        feat_tabs = st.tabs(["Openflow", "Snowpipe Streaming", "Iceberg Writes", "Lakehouse Analytics", "Dynamic Tables", "Snowpark"])
 
         simple_configs = [
             ("Openflow", "OPENFLOW", "🌊 Massive whitespace — top accounts have zero Openflow credits. The connector conversation is wide open."),
@@ -760,7 +802,7 @@ with tabs[2]:
         ]
 
         def _render_interop_lakehouse(df_source, filter_col, filter_label, blurb):
-            df_t = df_source[df_source[filter_col] < 500].head(10).reset_index(drop=True)
+            df_t = df_source[df_source[filter_col] < 500].head(30).reset_index(drop=True)
             df_t = df_t.copy()
             df_t[INTEROP_LABEL] = df_t["ICEBERG"]
             df_t[LAKEHOUSE_LABEL] = df_t["LAKEHOUSE"]
@@ -781,7 +823,7 @@ with tabs[2]:
             st.info(blurb)
 
         with feat_tabs[0]:
-            df_t = df_feat[df_feat["OPENFLOW"] < 500].head(10).reset_index(drop=True)
+            df_t = df_feat[df_feat["OPENFLOW"] < 500].head(30).reset_index(drop=True)
             df_t = add_sfdc(df_t)
             df_t.index = df_t.index + 1
             disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "OPENFLOW", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
@@ -790,7 +832,7 @@ with tabs[2]:
             st.info("🌊 Massive whitespace — top accounts have zero Openflow credits. The connector conversation is wide open.")
 
         with feat_tabs[1]:
-            df_t = df_feat[df_feat["STREAMING"] < 500].head(10).reset_index(drop=True)
+            df_t = df_feat[df_feat["STREAMING"] < 500].head(30).reset_index(drop=True)
             df_t = add_sfdc(df_t)
             df_t.index = df_t.index + 1
             disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "STREAMING", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
@@ -807,7 +849,7 @@ with tabs[2]:
                 "📊 Accounts with high DE credits but low Lakehouse Analytics usage — the analytics-on-Iceberg motion is wide open.")
 
         with feat_tabs[4]:
-            df_t = df_feat[df_feat["DT"] < 500].head(10).reset_index(drop=True)
+            df_t = df_feat[df_feat["DT"] < 500].head(30).reset_index(drop=True)
             df_t = add_sfdc(df_t)
             df_t.index = df_t.index + 1
             disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "DT", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
@@ -816,7 +858,7 @@ with tabs[2]:
             st.info("♻️ DT-using accounts show higher average growth. High-credit accounts on Tasks/DML are the top DT migration targets.")
 
         with feat_tabs[5]:
-            df_t = df_feat[df_feat["SNOWPARK"] < 500].head(10).reset_index(drop=True)
+            df_t = df_feat[df_feat["SNOWPARK"] < 500].head(30).reset_index(drop=True)
             df_t = add_sfdc(df_t)
             df_t.index = df_t.index + 1
             disp = df_t[["ACCOUNT", "REGION", "AE", "SE", "TOTAL_CREDITS", "SNOWPARK", "SFDC_LINK"]].rename(columns={"TOTAL_CREDITS": f"{M3_LBL} Credits"})
@@ -833,7 +875,7 @@ with tabs[3]:
         "**Tier 3 (Growing):** 0-1 features"
     )
     with st.spinner("Loading maturity data…"):
-        df_mat = q_maturity(theater, region_sql)
+        df_mat = q_maturity(theater, region_sql, _m3_date, _m3_next_date)
 
     if not df_mat.empty:
         tier_counts = df_mat["TIER"].value_counts().to_dict()
@@ -1006,9 +1048,9 @@ with tabs[4]:
     )
 
     with st.spinner("Loading territory data for analysis…"):
-        df_cf_ai = q_cross_feature(theater, region_sql)
-        df_feat_ai = q_features(theater, region_sql)
-        df_mat_ai = q_maturity(theater, region_sql)
+        df_cf_ai = q_cross_feature(theater, region_sql, _m1_date, _m3_date, _m3_next_date)
+        df_feat_ai = q_features(theater, region_sql, _m3_date, _m3_next_date)
+        df_mat_ai = q_maturity(theater, region_sql, _m3_date, _m3_next_date)
 
     context = _build_ai_context(
         theater, region_label, df_summary, df_pivoted, df_cf_ai, df_feat_ai, df_mat_ai
@@ -1085,9 +1127,10 @@ _DE_KW_ALL = """(
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_gong_volume(theater, region, days=90):
+def q_gong_volume(theater, region, date_from, date_to_next):
     gc = _gong_clause(theater, region)
-    since = f"DATEADD('day', -{days}, CURRENT_DATE())"
+    since = f"'{date_from}'"
+    until = f"'{date_to_next}'"
     return conn.query(f"""
         SELECT
             DATE_TRUNC('month', CONV_DATE)::DATE AS MONTH,
@@ -1112,21 +1155,22 @@ def q_gong_volume(theater, region, days=90):
                      OR LOWER(CLEANED_DIALOGUE) LIKE '%parquet%'
                      THEN 1 ELSE 0 END) AS LAKEHOUSE_CALLS
         FROM SALES.ACTIVITY.GONG_ALL_CONV_COMPETITOR
-        WHERE {gc} AND CONV_DATE >= {since}
+        WHERE {gc} AND CONV_DATE >= {since} AND CONV_DATE < {until}
           AND {_DE_KW_ALL}
         GROUP BY 1 ORDER BY 1
     """, ttl=0)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_gong_freq(theater, region, days=90):
+def q_gong_freq(theater, region, date_from, date_to_next):
     gc = _gong_clause(theater, region)
-    since = f"DATEADD('day', -{days}, CURRENT_DATE())"
+    since = f"'{date_from}'"
+    until = f"'{date_to_next}'"
     return conn.query(f"""
         WITH de_calls AS (
             SELECT ACCOUNT_NAME, CONV_DATE, CLEANED_DIALOGUE
             FROM SALES.ACTIVITY.GONG_ALL_CONV_COMPETITOR
-            WHERE {gc} AND CONV_DATE >= {since} AND {_DE_KW_ALL}
+            WHERE {gc} AND CONV_DATE >= {since} AND CONV_DATE < {until} AND CONV_DATE < {until} AND {_DE_KW_ALL}
         )
         SELECT keyword,
                COUNT(*) AS CALLS_MENTIONING,
@@ -1165,13 +1209,14 @@ def q_gong_freq(theater, region, days=90):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_gong_top_accts(theater, region, days=90):
+def q_gong_top_accts(theater, region, date_from, date_to_next):
     gc = _gong_clause(theater, region)
-    since = f"DATEADD('day', -{days}, CURRENT_DATE())"
+    since = f"'{date_from}'"
+    until = f"'{date_to_next}'"
     return conn.query(f"""
         SELECT ACCOUNT_NAME, COUNT(*) AS DE_CALL_COUNT
         FROM SALES.ACTIVITY.GONG_ALL_CONV_COMPETITOR
-        WHERE {gc} AND CONV_DATE >= {since} AND {_DE_KW_ALL}
+        WHERE {gc} AND CONV_DATE >= {since} AND CONV_DATE < {until} AND {_DE_KW_ALL}
         GROUP BY ACCOUNT_NAME
         ORDER BY DE_CALL_COUNT DESC
         LIMIT 20
@@ -1179,9 +1224,10 @@ def q_gong_top_accts(theater, region, days=90):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_gong_area_ai(theater, region, area, days=90):
+def q_gong_area_ai(theater, region, area, date_from, date_to_next):
     gc = _gong_clause(theater, region)
-    since = f"DATEADD('day', -{days}, CURRENT_DATE())"
+    since = f"'{date_from}'"
+    until = f"'{date_to_next}'"
 
     if area == "Ingestion":
         kw_filter = """(LOWER(CLEANED_DIALOGUE) LIKE '%openflow%'
@@ -1268,7 +1314,7 @@ def q_gong_area_ai(theater, region, area, days=90):
                 {snippet_case} AS snippet,
                 ROW_NUMBER() OVER (PARTITION BY ACCOUNT_NAME ORDER BY CONV_DATE DESC) AS rn
             FROM SALES.ACTIVITY.GONG_ALL_CONV_COMPETITOR
-            WHERE {gc} AND CONV_DATE >= {since} AND {kw_filter}
+            WHERE {gc} AND CONV_DATE >= {since} AND CONV_DATE < {until} AND {kw_filter}
         ),
         diverse_sample AS (
             SELECT ACCOUNT_NAME, CONV_DATE, snippet
@@ -1295,9 +1341,10 @@ def q_gong_area_ai(theater, region, area, days=90):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def q_gong_cross_summary(theater, region, days=90):
+def q_gong_cross_summary(theater, region, date_from, date_to_next):
     gc = _gong_clause(theater, region)
-    since = f"DATEADD('day', -{days}, CURRENT_DATE())"
+    since = f"'{date_from}'"
+    until = f"'{date_to_next}'"
     safe_gc = gc.replace("'", "''")
     territory_label = f"{theater}" + (f" / {region}" if region != ALL_REGIONS else " (all regions)")
     prompt_prefix = (
@@ -1782,9 +1829,9 @@ with tabs[5]:
     )
 
     with st.spinner("Loading Gong call volume…"):
-        df_gong_vol = q_gong_volume(theater, region)
-        df_gong_freq = q_gong_freq(theater, region)
-        df_gong_top = q_gong_top_accts(theater, region)
+        df_gong_vol = q_gong_volume(theater, region, _m1_date, _m3_next_date)
+        df_gong_freq = q_gong_freq(theater, region, _m1_date, _m3_next_date)
+        df_gong_top = q_gong_top_accts(theater, region, _m1_date, _m3_next_date)
 
     if df_gong_vol is None or df_gong_vol.empty:
         st.info("No DE-related Gong calls found for this territory in the last 90 days.")
@@ -1833,7 +1880,7 @@ with tabs[5]:
 
         if st.button("Generate AI Analysis", key="gong_ai_btn", type="primary"):
             with st.spinner("Analyzing Gong transcripts across all DE areas — this may take 30–60 seconds…"):
-                res_sum = q_gong_cross_summary(theater, region)
+                res_sum = q_gong_cross_summary(theater, region, _m1_date, _m3_next_date)
             if res_sum is not None and not res_sum.empty:
                 with st.container(border=True):
                     st.markdown(str(res_sum["ANALYSIS"].iloc[0]))
@@ -1900,9 +1947,9 @@ with tabs[6]:
 
         st.divider()
 
-        st.markdown(f"### Recent Wins and Losses  <small style='font-weight:normal;color:gray;'>Decision Date: {uc_date_from.strftime('%b %d, %Y')} – {uc_date_to.strftime('%b %d, %Y')}</small>", unsafe_allow_html=True)
+        st.markdown(f"### Recent Wins and Losses  <small style='font-weight:normal;color:gray;'>Decision Date: {dw_from.strftime('%b %Y')} – {dw_to_end.strftime('%b %Y')}</small>", unsafe_allow_html=True)
         with st.spinner("Loading recent wins and losses…"):
-            df_uc_recent = q_uc_recent(theater, region, uc_date_from, uc_date_to)
+            df_uc_recent = q_uc_recent(theater, region, dw_from, dw_to_end)
 
         if df_uc_recent is not None and not df_uc_recent.empty:
             SFDC_UC = "https://snowforce.lightning.force.com/lightning/r/Use_Case__c/{}/view"
@@ -1961,8 +2008,7 @@ with tabs[6]:
                 else:
                     st.info("No losses in this date range.")
         else:
-            st.info(f"No wins or losses with a Decision Date between {uc_date_from.strftime('%b %d, %Y')} and {uc_date_to.strftime('%b %d, %Y')}.")
-
+            st.info(f"No wins or losses with a Decision Date between {dw_from.strftime('%b %Y')} and {dw_to_end.strftime('%b %Y')}.")
         st.divider()
         st.markdown("### Win/Loss Themes")
         st.caption("Identify recurring patterns across wins and losses — architecture, business problems, features, competitors")
