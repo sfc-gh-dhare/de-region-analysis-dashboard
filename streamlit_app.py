@@ -49,6 +49,17 @@ ALL_FEATURES = list(FEATURE_DEFS.keys())
 ALL_REGIONS = "__ALL__"
 
 
+def _region_label(region):
+    return "All Regions" if region == ALL_REGIONS else " + ".join(region)
+
+
+def _region_sql_clause(region, col):
+    if region == ALL_REGIONS:
+        return ""
+    r_list = ", ".join(f"'{r}'" for r in region)
+    return f"AND {col} IN ({r_list})"
+
+
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -107,14 +118,20 @@ with st.sidebar:
     regions = sorted(
         terr_opts[terr_opts["GEO"] == theater]["SALES_AREA"].dropna().unique().tolist()
     )
-    region_options = ["All Regions (Theater-Wide)"] + regions
-    region_selection = st.selectbox(
+    region_selections = st.multiselect(
         "Region",
-        region_options,
-        index=region_options.index("HCLS") if "HCLS" in region_options else 0,
+        options=regions,
+        default=["HCLS"] if "HCLS" in regions else regions,
     )
-    region = ALL_REGIONS if region_selection == "All Regions (Theater-Wide)" else region_selection
-    region_sql = "" if region == ALL_REGIONS else f"AND SALES_AREA='{region}'"
+    if not region_selections or set(region_selections) == set(regions):
+        region = ALL_REGIONS
+    else:
+        region = tuple(sorted(region_selections))
+    if region == ALL_REGIONS:
+        region_sql = ""
+    else:
+        _r_list = ", ".join(f"'{r}'" for r in region)
+        region_sql = f"AND SALES_AREA IN ({_r_list})"
 
     st.divider()
     selected_features = st.multiselect(
@@ -465,7 +482,7 @@ acct_count = int(df_meta["ACCOUNT_COUNT"].iloc[0]) if df_meta is not None and no
 rvp = str(df_meta["RVP"].iloc[0]) if df_meta is not None and not df_meta.empty and pd.notna(df_meta["RVP"].iloc[0]) else "—"
 se_rvp = str(df_meta["SE_RVP"].iloc[0]) if df_meta is not None and not df_meta.empty and "SE_RVP" in df_meta.columns and pd.notna(df_meta["SE_RVP"].iloc[0]) else ""
 
-region_label = "All Regions" if region == ALL_REGIONS else region
+region_label = _region_label(region)
 st.title(f"{theater} · {region_label} — DE + Lakehouse Territory Deep Dive")
 
 _meta_parts = [
@@ -917,21 +934,74 @@ with tabs[3]:
 
 
 # ── Tab 8: Recommendations ───────────────────────────────────────────────────
-def _build_ai_context(theater, region_label, df_sum, df_piv, df_cf, df_feat, df_mat):
+def _build_ai_context(theater, region_label, df_sum, df_piv, df_cf, df_feat, df_mat,
+                      df_biz=None, df_gong_freq=None):
     lines = [f"TERRITORY: {theater} / {region_label}"]
 
     if not df_sum.empty:
         s = df_sum.sort_values("MONTH")
         r1, r3 = s.iloc[0], s.iloc[-1]
         t_pct = (r3["TOTAL"] - r1["TOTAL"]) / r1["TOTAL"] * 100 if r1["TOTAL"] > 0 else 0
-        lines.append(f"\n3-MONTH CONSUMPTION ({M1_LBL} to {M3_LBL}):")
-        lines.append(f"  Grand Total: {int(r1['TOTAL']):,} to {int(r3['TOTAL']):,} credits ({t_pct:+.1f}%)")
-        lines.append(f"  Ingestion: {int(r3['INGESTION']):,}  Transformation: {int(r3['TRANSFORMATION']):,}")
-        lines.append(f"  Interop Storage (Iceberg): {int(r3['INTEROP_STORAGE']):,}  Lakehouse Analytics: {int(r3['LAKEHOUSE_ANALYTICS']):,}")
+        lines.append(f"\n3-MONTH CONSUMPTION TREND ({M1_LBL} → {M3_LBL}):")
+        lines.append(f"  Grand Total: {int(r1['TOTAL']):,} → {int(r3['TOTAL']):,} credits ({t_pct:+.1f}%)")
+        lines.append(f"  Ingestion: {int(r3['INGESTION']):,}  |  Transformation: {int(r3['TRANSFORMATION']):,}")
+        lines.append(f"  Iceberg/Interop Storage: {int(r3['INTEROP_STORAGE']):,}  |  Lakehouse Analytics: {int(r3['LAKEHOUSE_ANALYTICS']):,}")
         lines.append(f"  Active accounts: {int(r3['ACTIVE_ACCOUNTS'])}")
 
+    if not df_feat.empty:
+        top15 = df_feat.head(15)
+        lines.append(f"\nTOP 15 ACCOUNTS BY DE+LAKEHOUSE CREDITS ({M3_LBL}) — FULL FEATURE STACK:")
+        lines.append("  (Format: Account [Region] | Total Credits | Openflow | Streaming | Iceberg | DynTables | Snowpark | Lakehouse)")
+        for _, r in top15.iterrows():
+            region_info = f" [{r['REGION']}]" if "REGION" in r and pd.notna(r.get("REGION")) else ""
+            of = int(r.get("OPENFLOW", 0) or 0)
+            st_ = int(r.get("STREAMING", 0) or 0)
+            ic = int(r.get("ICEBERG", 0) or 0)
+            dt = int(r.get("DT", 0) or 0)
+            sp = int(r.get("SNOWPARK", 0) or 0)
+            lk = int(r.get("LAKEHOUSE", 0) or 0)
+            tc = int(r.get("TOTAL_CREDITS", 0) or 0)
+            features_active = [name for name, val in [("Openflow", of), ("Streaming", st_),
+                ("Iceberg", ic), ("DynTables", dt), ("Snowpark", sp), ("Lakehouse", lk)] if val > 0]
+            lines.append(
+                f"  {r['ACCOUNT']}{region_info} | {tc:,} total | "
+                f"OF:{of:,} STR:{st_:,} ICE:{ic:,} DT:{dt:,} SNP:{sp:,} LKH:{lk:,} "
+                f"[Active features: {', '.join(features_active) if features_active else 'none'}]"
+            )
+
+    if not df_mat.empty:
+        top25 = df_mat.sort_values("TOTAL_CREDITS", ascending=False).head(25)
+        feat_cols = [c for c in ["OPENFLOW", "STREAMING", "ICEBERG", "DT", "SNOWPARK", "DBT", "LAKEHOUSE"] if c in top25.columns]
+        combos = {}
+        for _, r in top25.iterrows():
+            active = [c for c in feat_cols if str(r.get(c, "")) == "✓"]
+            for i in range(len(active)):
+                for j in range(i + 1, len(active)):
+                    key = f"{active[i]}+{active[j]}"
+                    combos[key] = combos.get(key, 0) + 1
+        if combos:
+            sorted_combos = sorted(combos.items(), key=lambda x: x[1], reverse=True)[:8]
+            lines.append("\nFEATURE COMBINATION PATTERNS (top 25 accounts by credits):")
+            for combo, cnt in sorted_combos:
+                lines.append(f"  {combo}: {cnt} accounts")
+        n_multi = int((top25[feat_cols] == "✓").sum(axis=1).ge(3).sum()) if feat_cols else 0
+        n_single = int((top25[feat_cols] == "✓").sum(axis=1).le(1).sum()) if feat_cols else 0
+        if n_multi or n_single:
+            lines.append(f"  Accounts using 3+ features: {n_multi}  |  Using 0-1 features: {n_single}")
+        tc_col = "TOTAL_CREDITS" if "TOTAL_CREDITS" in top25.columns else None
+        if tc_col and feat_cols:
+            top25["_n_feats"] = (top25[feat_cols] == "✓").sum(axis=1)
+            avg_multi = top25[top25["_n_feats"] >= 3][tc_col].mean()
+            avg_single = top25[top25["_n_feats"] <= 1][tc_col].mean()
+            if not pd.isna(avg_multi) and not pd.isna(avg_single):
+                lines.append(f"  Avg credits — 3+ feature accounts: {int(avg_multi):,}  |  0-1 feature accounts: {int(avg_single):,}")
+        tc_ = df_mat["TIER"].value_counts().to_dict()
+        lines.append("\nFEATURE MATURITY TIERS (all accounts):")
+        for tier, cnt in tc_.items():
+            lines.append(f"  {tier}: {cnt} accounts")
+
     if not df_cf.empty:
-        lines.append("\nFEATURE ADOPTION AND GROWTH CORRELATION:")
+        lines.append("\nFEATURE ADOPTION → GROWTH CORRELATION:")
         for _, r in df_cf.iterrows():
             feat = str(r.get("FEATURE", r.get("Feature", "")))
             accts = int(r.get("ACCTS_WITH", r.get("Accts Using", 0)) or 0)
@@ -939,38 +1009,51 @@ def _build_ai_context(theater, region_label, df_sum, df_piv, df_cf, df_feat, df_
             avg_wo = r.get("AVG_WITHOUT", r.get("Avg Growth (WITHOUT)"))
             w_str = f"{avg_w:+.1f}%" if avg_w is not None and not pd.isna(avg_w) else "N/A"
             wo_str = f"{avg_wo:+.1f}%" if avg_wo is not None and not pd.isna(avg_wo) else "N/A"
-            lines.append(f"  {feat}: {accts} accounts using — avg growth {w_str} (users) vs {wo_str} (non-users)")
-
-    if not df_mat.empty:
-        tc = df_mat["TIER"].value_counts().to_dict()
-        lines.append("\nFEATURE MATURITY TIERS:")
-        for tier, cnt in tc.items():
-            lines.append(f"  {tier}: {cnt} accounts")
+            lines.append(f"  {feat}: {accts} accounts using — avg growth {w_str} (adopters) vs {wo_str} (non-adopters)")
 
     if not df_piv.empty:
-        top5 = df_piv[df_piv["M1"] > 0].sort_values("PCT_CHANGE", ascending=False).head(5)
-        if not top5.empty:
-            lines.append(f"\nTOP 5 GROWERS ({M1_LBL} to {M3_LBL}, min 1 credit base):")
-            for _, r in top5.iterrows():
+        top8 = df_piv[df_piv["M1"] > 0].sort_values("PCT_CHANGE", ascending=False).head(8)
+        if not top8.empty:
+            lines.append(f"\nTOP 8 FASTEST GROWERS ({M1_LBL} → {M3_LBL}):")
+            for _, r in top8.iterrows():
                 region_info = f" [{r['REGION']}]" if "REGION" in r and pd.notna(r.get("REGION")) else ""
                 lines.append(f"  {r['ACCOUNT']}{region_info}: {int(r['M3']):,} credits ({r['PCT_CHANGE']:+.1f}%), AE: {r['AE']}, SE: {r['SE']}")
-
         decliners5 = df_piv[(df_piv["M1"] > 5000) & (df_piv["M3"] < df_piv["M1"])].sort_values("PCT_CHANGE").head(5)
         if not decliners5.empty:
             lines.append("\nAT-RISK HIGH-VOLUME ACCOUNTS (declining):")
             for _, r in decliners5.iterrows():
                 lines.append(f"  {r['ACCOUNT']}: {int(r['M3']):,} credits ({r['PCT_CHANGE']:+.1f}%)")
 
+    if df_biz is not None and not df_biz.empty:
+        lines.append("\nBUSINESS PROBLEMS BEING SOLVED (DE/Lakehouse use cases, ranked by EACV):")
+        lines.append("  (These are the actual business outcomes customers are buying Snowflake to solve)")
+        for _, r in df_biz.head(12).iterrows():
+            eacv_m = (r.get("TOTAL_EACV", 0) or 0) / 1_000_000
+            lines.append(
+                f"  {r['BUSINESS_PROBLEM']} | {int(r.get('UC_COUNT', 0))} use cases | "
+                f"{int(r.get('ACCT_COUNT', 0))} accounts | ${eacv_m:.1f}M EACV"
+            )
+
+    if df_gong_freq is not None and not df_gong_freq.empty:
+        kw_col = "keyword" if "keyword" in df_gong_freq.columns else df_gong_freq.columns[0]
+        lines.append("\nDATA SOURCES & TECHNOLOGIES MENTIONED IN CUSTOMER CALLS (Gong transcript frequency):")
+        lines.append("  (Indicates what pipelines, sources, and competing tools customers are actively discussing)")
+        for _, r in df_gong_freq.head(16).iterrows():
+            calls = int(r.get("CALLS_MENTIONING", 0) or 0)
+            accts = int(r.get("UNIQUE_ACCOUNTS", 0) or 0)
+            if calls > 0:
+                lines.append(f"  {r[kw_col]}: {calls} calls | {accts} accounts")
+
     if not df_feat.empty:
         top10 = df_feat[df_feat["TOTAL_CREDITS"] > 5000].head(10)
         if not top10.empty:
-            lines.append(f"\nFEATURE WHITESPACE — HIGH-VOLUME ACCOUNTS (last month credits, gaps = 0 usage):")
+            lines.append(f"\nFEATURE WHITESPACE — HIGH-VOLUME ACCOUNTS (zero usage gaps):")
             for _, r in top10.iterrows():
-                gaps = [f for f, col in [("Openflow","OPENFLOW"),("Streaming","STREAMING"),
-                        ("Iceberg","ICEBERG"),("Dyn Tables","DT"),("Snowpark","SNOWPARK"),
-                        ("dbt","LAKEHOUSE"),("Lakehouse","LAKEHOUSE")] if r.get(col, 0) == 0]
+                gaps = [f for f, col in [("Openflow", "OPENFLOW"), ("Streaming", "STREAMING"),
+                        ("Iceberg", "ICEBERG"), ("DynTables", "DT"), ("Snowpark", "SNOWPARK"),
+                        ("Lakehouse", "LAKEHOUSE")] if r.get(col, 0) == 0]
                 region_info = f" [{r['REGION']}]" if "REGION" in r and pd.notna(r.get("REGION")) else ""
-                lines.append(f"  {r['ACCOUNT']}{region_info}: {int(r['TOTAL_CREDITS']):,} credits — gaps: {', '.join(gaps) if gaps else 'none'}")
+                lines.append(f"  {r['ACCOUNT']}{region_info}: {int(r['TOTAL_CREDITS']):,} credits — missing: {', '.join(gaps) if gaps else 'none'}")
 
     return "\n".join(lines)
 
@@ -979,48 +1062,54 @@ def _build_ai_context(theater, region_label, df_sum, df_piv, df_cf, df_feat, df_
 def _call_cortex_recommendations(theater, region_label, context_str):
     safe = context_str.replace("'", "''").replace("\\", "\\\\")
     prompt = (
-        "You are a senior Snowflake Data Engineering field expert and sales strategist. "
-        "Using ONLY the territory data provided below, give two outputs:\\n\\n"
+        "You are a senior Snowflake Data Engineering field strategist with deep expertise in "
+        "DE/ML platform architecture, consumption growth patterns, and enterprise data pipeline modernization. "
+        "You have access to detailed territory data below including full feature stacks of top accounts, "
+        "feature combination patterns, business problems being solved, and technologies customers are discussing. "
+        "Using ONLY this data, generate two outputs:\\n\\n"
+
         "**PART 1 — TOP 10 TERRITORY STRATEGIES**\\n"
-        "Provide 10 specific, actionable strategies to grow DE + Lakehouse Analytics consumption "
-        "in this territory. Ground each strategy in the actual data (feature adoption gaps, "
-        "maturity tier distribution, growth correlations). Be specific — reference feature names, "
-        "trends, and account segments where relevant.\\n"
-        "For each strategy, assign a **Confidence Score: XX%** (whole number, 0-100) that reflects "
-        "how likely this play will drive measurable consumption growth in this specific territory. "
-        "Score based on the data signals present: higher score when there is strong account-level "
-        "evidence (multiple growers using this motion, positive growth correlation data, large "
-        "whitespace in high-volume accounts, clear trend momentum); lower score when evidence is "
-        "thin (few accounts, mixed signals, low base credits, speculative). "
-        "Scores should vary meaningfully — do NOT decrease by a fixed increment. "
-        "Some plays may score similarly if evidence is comparable; others may score much lower "
-        "if the territory data is weak for that motion. "
-        "For each strategy also include a Target Accounts line listing the specific account "
-        "names from the data that are most likely to succeed with that motion — drawn from the "
-        "growers, whitespace, and feature adoption data provided. Name real accounts; do not use "
-        "placeholders. If fewer than 3 accounts clearly apply, name those and note why. "
-        "Format EACH strategy exactly as follows (the bold name on its own line first, then bullets):\\n"
-        "**[Short descriptive strategy name]**\\n"
+        "Generate 10 sophisticated, non-obvious strategies grounded in the actual patterns in this territory''s data. "
+        "DO NOT produce generic recommendations like ''pitch Snowpark to accounts not using it'' or ''position Dynamic Tables for transformation workflows.'' "
+        "These strategies must be derived from cross-cutting pattern analysis:\\n\\n"
+        "Specifically, your strategies MUST address some of these deeper questions:\\n"
+        "1. **Winning architecture patterns**: Which specific multi-feature combinations (e.g., Openflow+Iceberg+Dynamic Tables) appear most frequently among the highest-consuming accounts? "
+        "What does the ''modern DE stack'' look like in this territory? Which accounts have this pattern and which high-volume accounts are missing key components?\\n"
+        "2. **Feature sequencing intelligence**: Given an account''s current feature profile, what is the non-obvious NEXT feature to introduce? "
+        "What expansion sequences have produced the fastest growth — e.g., does adding Iceberg to an Openflow-heavy account unlock Lakehouse Analytics consumption faster than adding Dynamic Tables?\\n"
+        "3. **Business problem to feature mapping**: Which high-EACV business problems are being solved without the full DE feature stack that would accelerate them? "
+        "Where is there a mismatch between what customers say they need (Gong keywords, business problems) and what features they''re actually using?\\n"
+        "4. **Data pipeline and source patterns**: Based on the technologies and data sources customers are discussing in calls (Kafka, Fivetran, S3, CDC, etc.), "
+        "which Snowflake DE features directly address those pipelines? Which accounts are mentioning tools that Openflow or Snowpipe Streaming could replace or complement?\\n"
+        "5. **Growth outlier analysis**: What specifically is different about the fastest-growing accounts vs. similar-sized accounts that are flat? "
+        "Is it a specific feature combination? A business problem type? A pipeline pattern?\\n\\n"
+        "For each strategy:\\n"
+        "- **Confidence Score: XX%** — based on how strongly the territory data supports this pattern\\n"
+        "- **Target Accounts:** specific named accounts from the data where this motion applies\\n"
+        "- **The insight:** 2-3 sentences explaining the non-obvious pattern discovered and why it matters\\n"
+        "- **The action:** 1-2 sentences on the specific engagement play\\n\\n"
+        "Sort strategies by Confidence Score descending. Scores must vary meaningfully based on evidence strength.\\n\\n"
+        "Format EACH strategy exactly as:\\n"
+        "**[Short strategy name]**\\n"
         "- **Confidence Score: XX%**\\n"
-        "- **Target Accounts:** [comma-separated account names]\\n"
-        "- [Strategy description in 1-2 sentences]\\n\\n"
-        "Present strategies sorted by Confidence Score descending (highest first).\\n\\n"
+        "- **Target Accounts:** [names]\\n"
+        "- **Insight:** [pattern found in the data]\\n"
+        "- **Action:** [specific engagement play]\\n\\n"
+
         "**PART 2 — TOP 10 TARGET ACCOUNTS**\\n"
-        "Identify the 10 highest-priority individual accounts to engage for consumption growth. "
-        "Rank them from highest to lowest priority. For each account provide:\\n"
-        "  (a) **Confidence Score: XX%** — how confident you are this specific account will grow "
-        "if engaged now, based on its credit trend, whitespace gaps, and growth trajectory. "
-        "Score high when the account has strong recent momentum, identifiable feature gaps, and "
-        "high absolute credit volume. Score lower for volatile trend, thin data, or near-zero base. "
-        "Present accounts sorted by Confidence Score descending (highest first).\\n"
-        "Format EACH account exactly as follows (bold account name on its own line first, then bullets):\\n"
+        "Identify the 10 highest-priority accounts for immediate engagement. For each account, "
+        "use their full feature stack data to identify the specific expansion play — not just ''they have whitespace'' "
+        "but ''they are an Openflow+Snowpark shop actively discussing Kafka migration in calls, making Iceberg the logical next layer.'' "
+        "Rank by priority (highest first).\\n"
+        "Format EACH account as:\\n"
         "**[Account Name]**\\n"
         "- **Confidence Score: XX%**\\n"
-        "- **Why:** [data-driven reason]\\n"
-        "- **Whitespace:** [feature or use-case gap]\\n"
-        "- **Approach:** [recommended engagement action]\\n\\n"
-        "Format with clear markdown headers, bold account names, and bold Confidence Score labels. "
-        "Be direct and field-ready — not generic.\\n\\n"
+        "- **Current Stack:** [features they are actively using with credit volumes]\\n"
+        "- **Why Now:** [specific data signal — growth trend, Gong keyword, business problem alignment]\\n"
+        "- **Expansion Play:** [the specific non-obvious next feature or use case and why it fits their stack]\\n"
+        "- **AE/SE:** [from the data if available]\\n\\n"
+
+        "Be direct, field-ready, and specific. Every claim must trace back to something in the territory data below.\\n\\n"
         "TERRITORY DATA:\\n" + safe
     )
     sql = (
@@ -1041,65 +1130,92 @@ def _call_cortex_recommendations(theater, region_label, context_str):
         return conn.query(sql_fallback, ttl=0)
 
 
-with tabs[4]:
-    st.subheader("AI-Powered Consumption Recommendations")
-    st.caption(
-        "Powered by Snowflake Cortex · Strategies and target accounts tailored to your territory data · "
-        "Refresh page to regenerate with latest data"
+@st.cache_data(ttl=3600, show_spinner=False)
+def q_biz_problems(theater, region):
+    region_clause = _region_sql_clause(region, "REGION_NAME")
+    return conn.query(f"""
+        SELECT
+            INDUSTRY_USE_CASE AS BUSINESS_PROBLEM,
+            COUNT(DISTINCT USE_CASE_ID) AS UC_COUNT,
+            COUNT(DISTINCT ACCOUNT_ID) AS ACCT_COUNT,
+            SUM(USE_CASE_EACV) AS TOTAL_EACV
+        FROM sales.sales_engineering.use_case_level_data
+        WHERE DS = (SELECT MAX(DS) FROM sales.sales_engineering.use_case_level_data)
+          AND THEATER_NAME = '{theater}' {region_clause}
+          AND INDUSTRY_USE_CASE IS NOT NULL
+          AND INDUSTRY_USE_CASE NOT IN ('Undefined / Not a Business Function', '')
+          AND (
+              ARRAY_CONTAINS('DE: Ingestion'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+              OR ARRAY_CONTAINS('DE: Transformation'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+              OR ARRAY_CONTAINS('DE: Interoperable Storage'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+              OR ARRAY_CONTAINS('Analytics: Lakehouse Analytics'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+          )
+          AND IS_LOST = FALSE
+        GROUP BY 1
+        ORDER BY TOTAL_EACV DESC NULLS LAST
+    """, ttl=0)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def q_biz_problems_detail(theater, region):
+    region_clause = _region_sql_clause(region, "REGION_NAME")
+    return conn.query(f"""
+        SELECT
+            INDUSTRY_USE_CASE AS BUSINESS_PROBLEM,
+            ACCOUNT_INDUSTRY,
+            USE_CASE_ID,
+            USE_CASE_NAME,
+            ACCOUNT_NAME,
+            USE_CASE_EACV AS EACV,
+            USE_CASE_STAGE,
+            TECHNICAL_USE_CASE,
+            DECISION_DATE
+        FROM sales.sales_engineering.use_case_level_data
+        WHERE DS = (SELECT MAX(DS) FROM sales.sales_engineering.use_case_level_data)
+          AND THEATER_NAME = '{theater}' {region_clause}
+          AND INDUSTRY_USE_CASE IS NOT NULL
+          AND INDUSTRY_USE_CASE NOT IN ('Undefined / Not a Business Function', '')
+          AND (
+              ARRAY_CONTAINS('DE: Ingestion'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+              OR ARRAY_CONTAINS('DE: Transformation'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+              OR ARRAY_CONTAINS('DE: Interoperable Storage'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+              OR ARRAY_CONTAINS('Analytics: Lakehouse Analytics'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
+          )
+          AND IS_LOST = FALSE
+        ORDER BY USE_CASE_EACV DESC NULLS LAST
+        LIMIT 1000
+    """, ttl=0)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def q_biz_problems_ai(theater, region, summary_text):
+    territory_label = f"{theater}" + (f" / {_region_label(region)}" if region != ALL_REGIONS else " (all regions)")
+    safe = summary_text.replace("'", "''")
+    prompt = (
+        f"You are a senior Snowflake Data Engineering field expert. "
+        f"Based on the use case data below for {territory_label}, identify the top business problem themes. "
+        "Group them by industry-specific scenario (e.g. Clickstream Analytics, EDW Modernization, IoT Streaming, "
+        "Data Lake Consolidation, Real-Time Ingestion, Regulatory Reporting, etc.). "
+        "For each theme provide: (1) a short name, (2) which industries it appears in, "
+        "(3) total EACV opportunity, (4) 2-3 sentences on the business problem customers are solving, "
+        "(5) the relevant Snowflake DE/Lakehouse capability that addresses it.\\n"
+        "Focus on industry-specific problems, not generic categories like Finance or Operations. "
+        "Format as markdown with headers for each theme. Limit to top 8 themes.\\n\\n"
+        "USE CASE DATA:\\n" + safe
     )
-
-    with st.spinner("Loading territory data for analysis…"):
-        df_cf_ai = q_cross_feature(theater, region_sql, _m1_date, _m3_date, _m3_next_date)
-        df_feat_ai = q_features(theater, region_sql, _m3_date, _m3_next_date)
-        df_mat_ai = q_maturity(theater, region_sql, _m3_date, _m3_next_date)
-
-    context = _build_ai_context(
-        theater, region_label, df_summary, df_pivoted, df_cf_ai, df_feat_ai, df_mat_ai
+    sql = (
+        "SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '"
+        + prompt
+        + "') AS RESPONSE"
     )
-
-    with st.expander("View territory context sent to AI", expanded=False):
-        st.code(context, language=None)
-
-    with st.spinner("Generating recommendations with Cortex AI — this may take 15–30 seconds…"):
-        recs_df = _call_cortex_recommendations(theater, region_label, context)
-
-    def _colorize_confidence(text):
-        def _badge(m):
-            score = int(m.group(1))
-            if score >= 85:
-                color = "#27ae60"
-            elif score >= 70:
-                color = "#7dc743"
-            elif score >= 55:
-                color = "#f1c40f"
-            elif score >= 40:
-                color = "#e67e22"
-            else:
-                color = "#e74c3c"
-            return f'<span style="color:{color};font-weight:bold">Confidence Score: {score}%</span>'
-        return re.sub(r'\*{0,2}Confidence Score:\s*(\d+)%\*{0,2}', _badge, text)
-
-    if recs_df is not None and not recs_df.empty:
-        response_text = str(recs_df["RESPONSE"].iloc[0])
-
-        if "PART 1" in response_text or "## " in response_text:
-            parts = response_text.split("PART 2")
-            if len(parts) == 2:
-                col1, col2 = st.columns(2)
-                with col1:
-                    with st.container(border=True):
-                        st.markdown("### Territory Strategies")
-                        st.markdown(_colorize_confidence(parts[0].replace("PART 1 — TOP 10 TERRITORY STRATEGIES", "").replace("**PART 1 — TOP 10 TERRITORY STRATEGIES**", "").strip()), unsafe_allow_html=True)
-                with col2:
-                    with st.container(border=True):
-                        st.markdown("### Top 10 Target Accounts")
-                        st.markdown(_colorize_confidence(("PART 2" + parts[1]).replace("PART 2 — TOP 10 TARGET ACCOUNTS", "").replace("**PART 2 — TOP 10 TARGET ACCOUNTS**", "").strip()), unsafe_allow_html=True)
-            else:
-                st.markdown(_colorize_confidence(response_text), unsafe_allow_html=True)
-        else:
-            st.markdown(_colorize_confidence(response_text), unsafe_allow_html=True)
-    else:
-        st.error("Could not generate recommendations. Check that Cortex is enabled in this account.")
+    try:
+        return conn.query(sql, ttl=0)
+    except Exception:
+        sql2 = sql.replace("'claude-3-5-sonnet'", "'mistral-large2'")
+        try:
+            return conn.query(sql2, ttl=0)
+        except Exception:
+            return None
 
 
 # ─── Gong Analysis Helpers ────────────────────────────────────────────────────
@@ -1107,10 +1223,11 @@ with tabs[4]:
 def _gong_clause(theater, region):
     if region == ALL_REGIONS:
         return f"THEATER = '{theater}'"
+    r_list = ", ".join(f"'{r}'" for r in region)
     return (
         f"THEATER = '{theater}' AND ACCOUNT_NAME IN ("
         f"SELECT SALESFORCE_ACCOUNT_NAME FROM sales.raven.d_salesforce_account_customers "
-        f"WHERE GEO='{theater}' AND SALES_AREA='{region}' "
+        f"WHERE GEO='{theater}' AND SALES_AREA IN ({r_list}) "
         f"AND IS_CAPACITY_CUSTOMER=TRUE AND IS_REVENUE_ACCOUNT=TRUE)"
     )
 
@@ -1224,6 +1341,70 @@ def q_gong_top_accts(theater, region, date_from, date_to_next):
     """, ttl=0)
 
 
+with tabs[4]:
+    st.subheader("AI-Powered Consumption Recommendations")
+    st.caption(
+        "Powered by Snowflake Cortex · Deep pattern analysis: feature stacks, combination signals, "
+        "business problems, Gong data sources · Refresh page to regenerate"
+    )
+
+    with st.spinner("Loading territory data for analysis…"):
+        df_cf_ai = q_cross_feature(theater, region_sql, _m1_date, _m3_date, _m3_next_date)
+        df_feat_ai = q_features(theater, region_sql, _m3_date, _m3_next_date)
+        df_mat_ai = q_maturity(theater, region_sql, _m3_date, _m3_next_date)
+        df_biz_ai = q_biz_problems(theater, region)
+        df_gong_freq_ai = q_gong_freq(theater, region, _m1_date, _m3_next_date)
+
+    context = _build_ai_context(
+        theater, region_label, df_summary, df_pivoted, df_cf_ai, df_feat_ai, df_mat_ai,
+        df_biz=df_biz_ai, df_gong_freq=df_gong_freq_ai
+    )
+
+    with st.expander("View territory context sent to AI", expanded=False):
+        st.code(context, language=None)
+
+    with st.spinner("Generating recommendations with Cortex AI — this may take 15–30 seconds…"):
+        recs_df = _call_cortex_recommendations(theater, region_label, context)
+
+    def _colorize_confidence(text):
+        def _badge(m):
+            score = int(m.group(1))
+            if score >= 85:
+                color = "#27ae60"
+            elif score >= 70:
+                color = "#7dc743"
+            elif score >= 55:
+                color = "#f1c40f"
+            elif score >= 40:
+                color = "#e67e22"
+            else:
+                color = "#e74c3c"
+            return f'<span style="color:{color};font-weight:bold">Confidence Score: {score}%</span>'
+        return re.sub(r'\*{0,2}Confidence Score:\s*(\d+)%\*{0,2}', _badge, text)
+
+    if recs_df is not None and not recs_df.empty:
+        response_text = str(recs_df["RESPONSE"].iloc[0])
+
+        if "PART 1" in response_text or "## " in response_text:
+            parts = response_text.split("PART 2")
+            if len(parts) == 2:
+                col1, col2 = st.columns(2)
+                with col1:
+                    with st.container(border=True):
+                        st.markdown("### Territory Strategies")
+                        st.markdown(_colorize_confidence(parts[0].replace("PART 1 — TOP 10 TERRITORY STRATEGIES", "").replace("**PART 1 — TOP 10 TERRITORY STRATEGIES**", "").strip()), unsafe_allow_html=True)
+                with col2:
+                    with st.container(border=True):
+                        st.markdown("### Top 10 Target Accounts")
+                        st.markdown(_colorize_confidence(("PART 2" + parts[1]).replace("PART 2 — TOP 10 TARGET ACCOUNTS", "").replace("**PART 2 — TOP 10 TARGET ACCOUNTS**", "").strip()), unsafe_allow_html=True)
+            else:
+                st.markdown(_colorize_confidence(response_text), unsafe_allow_html=True)
+        else:
+            st.markdown(_colorize_confidence(response_text), unsafe_allow_html=True)
+    else:
+        st.error("Could not generate recommendations. Check that Cortex is enabled in this account.")
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_gong_area_ai(theater, region, area, date_from, date_to_next):
     gc = _gong_clause(theater, region)
@@ -1296,7 +1477,7 @@ def q_gong_area_ai(theater, region, area, date_from, date_to_next):
     safe_gc = gc.replace("'", "''")
     prompt_prefix = (
         f"You are analyzing up to 40 real Gong call transcript snippets from Snowflake {theater} territory"
-        + (f" / {region} region" if region != ALL_REGIONS else "")
+        + (f" / {_region_label(region)} region" if region != ALL_REGIONS else "")
         + f". Topic: {topic}. Each snippet is labeled with customer account name and date.\\n\\n"
         "## Common Themes & Topics\\nTop 5-7 recurring themes. Be specific.\\n\\n"
         "## Most Discussed Features & Products\\nWhich features come up most? Rank them with context.\\n\\n"
@@ -1347,7 +1528,7 @@ def q_gong_cross_summary(theater, region, date_from, date_to_next):
     since = f"'{date_from}'"
     until = f"'{date_to_next}'"
     safe_gc = gc.replace("'", "''")
-    territory_label = f"{theater}" + (f" / {region}" if region != ALL_REGIONS else " (all regions)")
+    territory_label = f"{theater}" + (f" / {_region_label(region)}" if region != ALL_REGIONS else " (all regions)")
     prompt_prefix = (
         f"You are analyzing 50 real Gong call transcript snippets from Snowflake {territory_label} territory. "
         "These span all Data Engineering topics: Ingestion (Openflow, Snowpipe, Kafka, CDC, Fivetran), "
@@ -1417,7 +1598,7 @@ _DE_FEATURE_FILTER = "PRIORITIZED_FEATURE ILIKE ANY ('%DE -%', '%Snowpark%', '%D
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_uc_summary(theater, region, days=365):
-    region_clause = "" if region == ALL_REGIONS else f"AND REGION = '{region}'"
+    region_clause = _region_sql_clause(region, "REGION")
     since = f"DATEADD('day', -{days}, CURRENT_DATE())"
     return conn.query(f"""
         SELECT
@@ -1444,7 +1625,7 @@ def q_uc_summary(theater, region, days=365):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_uc_wins(theater, region, days=365):
-    region_clause = "" if region == ALL_REGIONS else f"AND REGION = '{region}'"
+    region_clause = _region_sql_clause(region, "REGION")
     since = f"DATEADD('day', -{days}, CURRENT_DATE())"
     return conn.query(f"""
         SELECT
@@ -1472,7 +1653,7 @@ def q_uc_wins(theater, region, days=365):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_uc_losses(theater, region, days=365):
-    region_clause = "" if region == ALL_REGIONS else f"AND REGION = '{region}'"
+    region_clause = _region_sql_clause(region, "REGION")
     since = f"DATEADD('day', -{days}, CURRENT_DATE())"
     return conn.query(f"""
         SELECT
@@ -1499,7 +1680,7 @@ def q_uc_losses(theater, region, days=365):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_uc_recent(theater, region, date_from, date_to):
-    region_clause = "" if region == ALL_REGIONS else f"AND u.REGION = '{region}'"
+    region_clause = _region_sql_clause(region, "u.REGION")
     return conn.query(f"""
         SELECT
             u.USE_CASE_NUMBER,
@@ -1536,7 +1717,7 @@ def q_uc_recent(theater, region, date_from, date_to):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_uc_ai(theater, region, wins_text, losses_text):
-    territory_label = f"{theater}" + (f" / {region}" if region != ALL_REGIONS else " (all regions)")
+    territory_label = f"{theater}" + (f" / {_region_label(region)}" if region != ALL_REGIONS else " (all regions)")
     safe_wins = wins_text.replace("'", "''")
     safe_losses = losses_text.replace("'", "''")
     prompt = (
@@ -1575,7 +1756,7 @@ def q_uc_ai(theater, region, wins_text, losses_text):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def q_uc_themes(theater, region, recent_text):
-    territory_label = f"{theater}" + (f" / {region}" if region != ALL_REGIONS else " (all regions)")
+    territory_label = f"{theater}" + (f" / {_region_label(region)}" if region != ALL_REGIONS else " (all regions)")
     safe = recent_text.replace("\\", "\\\\").replace("'", "''")
     prompt = (
         f"You are a senior Snowflake Data Engineering field expert. "
@@ -1662,7 +1843,8 @@ def _uc_rows_to_text(df, kind, max_rows=30):
 def _pgap_acct_filter(theater, region):
     if region == ALL_REGIONS:
         return f"GEO = '{theater}'"
-    return f"GEO = '{theater}' AND SALES_AREA = '{region}'"
+    r_list = ", ".join(f"'{r}'" for r in region)
+    return f"GEO = '{theater}' AND SALES_AREA IN ({r_list})"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1732,94 +1914,6 @@ def q_pgap_detail(theater, region):
           AND COALESCE(j.PRODUCT_CATEGORY, p.PRODUCT_LINE_C) = 'Data Engineering'
         LIMIT 2000
     """, ttl=0)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def q_biz_problems(theater, region):
-    region_clause = "" if region == ALL_REGIONS else f"AND REGION_NAME = '{region}'"
-    return conn.query(f"""
-        SELECT
-            INDUSTRY_USE_CASE AS BUSINESS_PROBLEM,
-            COUNT(DISTINCT USE_CASE_ID) AS UC_COUNT,
-            COUNT(DISTINCT ACCOUNT_ID) AS ACCT_COUNT,
-            SUM(USE_CASE_EACV) AS TOTAL_EACV
-        FROM sales.sales_engineering.use_case_level_data
-        WHERE DS = (SELECT MAX(DS) FROM sales.sales_engineering.use_case_level_data)
-          AND THEATER_NAME = '{theater}' {region_clause}
-          AND INDUSTRY_USE_CASE IS NOT NULL
-          AND INDUSTRY_USE_CASE NOT IN ('Undefined / Not a Business Function', '')
-          AND (
-              ARRAY_CONTAINS('DE: Ingestion'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-              OR ARRAY_CONTAINS('DE: Transformation'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-              OR ARRAY_CONTAINS('DE: Interoperable Storage'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-              OR ARRAY_CONTAINS('Analytics: Lakehouse Analytics'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-          )
-          AND IS_LOST = FALSE
-        GROUP BY 1
-        ORDER BY TOTAL_EACV DESC NULLS LAST
-    """, ttl=0)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def q_biz_problems_detail(theater, region):
-    region_clause = "" if region == ALL_REGIONS else f"AND REGION_NAME = '{region}'"
-    return conn.query(f"""
-        SELECT
-            INDUSTRY_USE_CASE AS BUSINESS_PROBLEM,
-            ACCOUNT_INDUSTRY,
-            USE_CASE_ID,
-            USE_CASE_NAME,
-            ACCOUNT_NAME,
-            USE_CASE_EACV AS EACV,
-            USE_CASE_STAGE,
-            TECHNICAL_USE_CASE,
-            DECISION_DATE
-        FROM sales.sales_engineering.use_case_level_data
-        WHERE DS = (SELECT MAX(DS) FROM sales.sales_engineering.use_case_level_data)
-          AND THEATER_NAME = '{theater}' {region_clause}
-          AND INDUSTRY_USE_CASE IS NOT NULL
-          AND INDUSTRY_USE_CASE NOT IN ('Undefined / Not a Business Function', '')
-          AND (
-              ARRAY_CONTAINS('DE: Ingestion'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-              OR ARRAY_CONTAINS('DE: Transformation'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-              OR ARRAY_CONTAINS('DE: Interoperable Storage'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-              OR ARRAY_CONTAINS('Analytics: Lakehouse Analytics'::VARIANT, TECHNICAL_USE_CASE_ARRAY)
-          )
-          AND IS_LOST = FALSE
-        ORDER BY USE_CASE_EACV DESC NULLS LAST
-        LIMIT 1000
-    """, ttl=0)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def q_biz_problems_ai(theater, region, summary_text):
-    territory_label = f"{theater}" + (f" / {region}" if region != ALL_REGIONS else " (all regions)")
-    safe = summary_text.replace("'", "''")
-    prompt = (
-        f"You are a senior Snowflake Data Engineering field expert. "
-        f"Based on the use case data below for {territory_label}, identify the top business problem themes. "
-        "Group them by industry-specific scenario (e.g. Clickstream Analytics, EDW Modernization, IoT Streaming, "
-        "Data Lake Consolidation, Real-Time Ingestion, Regulatory Reporting, etc.). "
-        "For each theme provide: (1) a short name, (2) which industries it appears in, "
-        "(3) total EACV opportunity, (4) 2-3 sentences on the business problem customers are solving, "
-        "(5) the relevant Snowflake DE/Lakehouse capability that addresses it.\\n"
-        "Focus on industry-specific problems, not generic categories like Finance or Operations. "
-        "Format as markdown with headers for each theme. Limit to top 8 themes.\\n\\n"
-        "USE CASE DATA:\\n" + safe
-    )
-    sql = (
-        "SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '"
-        + prompt
-        + "') AS RESPONSE"
-    )
-    try:
-        return conn.query(sql, ttl=0)
-    except Exception:
-        sql2 = sql.replace("'claude-3-5-sonnet'", "'mistral-large2'")
-        try:
-            return conn.query(sql2, ttl=0)
-        except Exception:
-            return None
 
 
 # ─── Tab 9: Gong Insights ────────────────────────────────────────────────────
@@ -2012,33 +2106,6 @@ with tabs[6]:
                     st.info("No losses in this date range.")
         else:
             st.info(f"No wins or losses with a Decision Date between {dw_from.strftime('%b %Y')} and {dw_to_end.strftime('%b %Y')}.")
-        st.divider()
-        st.markdown("### Win/Loss Themes")
-        st.caption("Identify recurring patterns across wins and losses — architecture, business problems, features, competitors")
-        if st.button("Identify Themes", key="uc_themes_btn", type="primary"):
-            if df_uc_recent is not None and not df_uc_recent.empty:
-                themes_text = _uc_recent_to_themes_text(df_uc_recent)
-                with st.spinner("Identifying themes — this may take 15–30 seconds…"):
-                    themes_df = q_uc_themes(theater, region, themes_text)
-                if themes_df is not None and not themes_df.empty:
-                    response = str(themes_df["RESPONSE"].iloc[0])
-                    split = response.split("**LOSS THEMES")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        with st.container(border=True):
-                            st.markdown("### Win Themes")
-                            st.markdown(split[0].replace("**WIN THEMES**", "").replace("**WIN THEMES —", "").strip())
-                    with col2:
-                        with st.container(border=True):
-                            st.markdown("### Loss Themes")
-                            st.markdown(("**LOSS THEMES" + split[1]) if len(split) > 1 else "")
-                else:
-                    st.warning("Theme analysis unavailable — Cortex model error.")
-            else:
-                st.info("No recent win/loss data to analyze.")
-        else:
-            st.info("Click **Identify Themes** to surface recurring patterns across wins and losses.")
-
         st.divider()
         st.markdown("### AI Win/Loss Synthesis")
         st.caption("Powered by Snowflake Cortex claude-3-5-sonnet · Based on last 12 months of DE use cases")
